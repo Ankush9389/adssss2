@@ -5,8 +5,12 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -14,7 +18,6 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
-import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import androidx.activity.OnBackPressedCallback
@@ -23,15 +26,6 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
-import com.google.android.gms.ads.AdError
-import com.google.android.gms.ads.AdRequest
-import com.google.android.gms.ads.AdView
-import com.google.android.gms.ads.FullScreenContentCallback
-import com.google.android.gms.ads.LoadAdError
-import com.google.android.gms.ads.MobileAds
-import com.google.android.gms.ads.appopen.AppOpenAd
-import com.google.android.gms.ads.interstitial.InterstitialAd
-import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback
 
 class MainActivity : AppCompatActivity() {
 
@@ -40,54 +34,60 @@ class MainActivity : AppCompatActivity() {
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private lateinit var fullscreenContainer: FrameLayout
     private lateinit var mainContent: LinearLayout
-    private lateinit var adView: AdView
+    private lateinit var topNativeAdWebView: WebView
     private lateinit var nativeAdWebView: WebView
-    private lateinit var btnBack: ImageButton
 
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
 
-    private var appOpenAd: AppOpenAd? = null
-    private var interstitialAd: InterstitialAd? = null
-    private var isShowingAd = false
     private var pageLoadCount = 0
+    private var clickCount = 0
 
-    private val appOpenAdUnitId = "ca-app-pub-5750308983692756/9676237432"
-    private val interstitialAdUnitId = "ca-app-pub-5750308983692756/9484665742"
-    private val smartlinkUrl = "https://asiafilm.org/4/c06e7c91ca54b103a6ef1e8c45e46d2f"
+    private val adRefreshHandler = Handler(Looper.getMainLooper())
+    private val adRefreshIntervalMs = 45_000L
+    private val adRefreshRunnable = object : Runnable {
+        override fun run() {
+            if (customView == null && !isFinishing && !isDestroyed) {
+                topNativeAdWebView.reload()
+                nativeAdWebView.reload()
+            }
+            adRefreshHandler.postDelayed(this, adRefreshIntervalMs)
+        }
+    }
 
-    private val startUrl = "https://m1.multimovies.courses/"
+    private val smartlinkUrls = listOf(
+        "https://asiafilm.org/4/ad35604b5b60c239237ee41c3e8f402a",
+        "https://directyp.org/4/bae193dc8298ba66cab50b57861444bd"
+    )
+    private var smartlinkIndex = 0
+    private val startUrl = "https://moonflix.website/browse"
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        MobileAds.initialize(this) {
-            loadAndShowAppOpenAd()
-            loadInterstitialAd()
-        }
-
         webView = findViewById(R.id.webView)
         progressBar = findViewById(R.id.progressBar)
         swipeRefresh = findViewById(R.id.swipeRefresh)
         fullscreenContainer = findViewById(R.id.fullscreenContainer)
         mainContent = findViewById(R.id.mainContent)
-        adView = findViewById(R.id.adView)
+        topNativeAdWebView = findViewById(R.id.topNativeAdWebView)
         nativeAdWebView = findViewById(R.id.nativeAdWebView)
-        btnBack = findViewById(R.id.btnBack)
 
-        setupNativeAd()
+        setupTopNativeAd()
+        setupBottomAds()
+        adRefreshHandler.postDelayed(adRefreshRunnable, adRefreshIntervalMs)
 
-        btnBack.setOnClickListener {
-            if (webView.canGoBack()) {
-                webView.goBack()
-            } else {
-                finish()
+        webView.setOnTouchListener { _, event ->
+            if (event.action == MotionEvent.ACTION_UP) {
+                clickCount++
+                if (clickCount % 16 == 0) {
+                    openSmartlink()
+                }
             }
+            false
         }
-
-        adView.loadAd(AdRequest.Builder().build())
 
         webView.settings.apply {
             javaScriptEnabled = true
@@ -126,10 +126,7 @@ class MainActivity : AppCompatActivity() {
                 view?.evaluateJavascript(AdBlocker.COSMETIC_ADBLOCK_JS, null)
 
                 pageLoadCount++
-                if (pageLoadCount > 1 && pageLoadCount % 3 == 0) {
-                    showInterstitialAd()
-                }
-                if (pageLoadCount == 2 || pageLoadCount % 5 == 0) {
+                if (pageLoadCount == 2 || pageLoadCount % 4 == 0) {
                     openSmartlink()
                 }
             }
@@ -159,9 +156,7 @@ class MainActivity : AppCompatActivity() {
                 fullscreenContainer.visibility = View.VISIBLE
                 mainContent.visibility = View.GONE
                 progressBar.visibility = View.GONE
-                btnBack.visibility = View.GONE
 
-                // Rotate to landscape and enable true immersive fullscreen
                 requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 setFullscreen(true)
             }
@@ -170,13 +165,11 @@ class MainActivity : AppCompatActivity() {
                 fullscreenContainer.removeAllViews()
                 fullscreenContainer.visibility = View.GONE
                 mainContent.visibility = View.VISIBLE
-                btnBack.visibility = View.VISIBLE
 
                 customViewCallback?.onCustomViewHidden()
                 customView = null
                 customViewCallback = null
 
-                // Restore orientation and system bars
                 requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
                 setFullscreen(false)
             }
@@ -213,84 +206,59 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadAndShowAppOpenAd() {
-        if (isShowingAd || appOpenAd != null) return
-
-        val request = AdRequest.Builder().build()
-        AppOpenAd.load(
-            this,
-            appOpenAdUnitId,
-            request,
-            object : AppOpenAd.AppOpenAdLoadCallback() {
-                override fun onAdLoaded(ad: AppOpenAd) {
-                    appOpenAd = ad
-                    ad.fullScreenContentCallback = object : FullScreenContentCallback() {
-                        override fun onAdDismissedFullScreenContent() {
-                            appOpenAd = null
-                            isShowingAd = false
-                        }
-
-                        override fun onAdFailedToShowFullScreenContent(adError: AdError) {
-                            appOpenAd = null
-                            isShowingAd = false
-                        }
-
-                        override fun onAdShowedFullScreenContent() {
-                            isShowingAd = true
-                        }
-                    }
-                    if (!isFinishing && !isDestroyed) {
-                        ad.show(this@MainActivity)
-                    }
-                }
-
-                override fun onAdFailedToLoad(loadAdError: LoadAdError) {
-                    appOpenAd = null
-                }
-            }
-        )
-    }
-
-    private fun loadInterstitialAd() {
-        val request = AdRequest.Builder().build()
-        InterstitialAd.load(
-            this,
-            interstitialAdUnitId,
-            request,
-            object : InterstitialAdLoadCallback() {
-                override fun onAdLoaded(ad: InterstitialAd) {
-                    interstitialAd = ad
-                }
-
-                override fun onAdFailedToLoad(loadAdError: LoadAdError) {
-                    interstitialAd = null
-                }
-            }
-        )
-    }
-
-    private fun showInterstitialAd() {
-        val ad = interstitialAd ?: return
-        ad.fullScreenContentCallback = object : FullScreenContentCallback() {
-            override fun onAdDismissedFullScreenContent() {
-                interstitialAd = null
-                loadInterstitialAd()
-            }
-
-            override fun onAdFailedToShowFullScreenContent(adError: AdError) {
-                interstitialAd = null
-            }
-        }
-        ad.show(this)
-    }
-
     @SuppressLint("SetJavaScriptEnabled")
-    private fun setupNativeAd() {
-        nativeAdWebView.settings.apply {
+    private fun configureAdWebView(adWebView: WebView) {
+        adWebView.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            javaScriptCanOpenWindowsAutomatically = true
         }
-        val nativeAdHtml = """
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(adWebView, true)
+        adWebView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): Boolean {
+                val url = request?.url?.toString() ?: return false
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                } catch (_: Exception) {
+                }
+                return true
+            }
+        }
+    }
+
+    private fun setupTopNativeAd() {
+        configureAdWebView(topNativeAdWebView)
+        topNativeAdWebView.settings.useWideViewPort = false
+        topNativeAdWebView.settings.loadWithOverviewMode = false
+        val topNativeHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    html, body { margin: 0; padding: 0; width: 100%; background: #000000; }
+                    #container-0e17b8fb5a802120ada324c402203f33 { width: 100%; }
+                </style>
+            </head>
+            <body>
+                <script async="async" data-cfasync="false" src="https://bancadeltempoidea.org/21/0e17b8fb5a802120ada324c402203f33"></script>
+                <div id="container-0e17b8fb5a802120ada324c402203f33"></div>
+            </body>
+            </html>
+        """.trimIndent()
+        topNativeAdWebView.loadDataWithBaseURL("https://bancadeltempoidea.org", topNativeHtml, "text/html", "UTF-8", null)
+    }
+
+    private fun setupBottomAds() {
+        configureAdWebView(nativeAdWebView)
+        val bottomAdHtml = """
             <!DOCTYPE html>
             <html>
             <head>
@@ -300,30 +268,36 @@ class MainActivity : AppCompatActivity() {
                 </style>
             </head>
             <body>
-                <script async="async" data-cfasync="false" src="https://bauval.org/21/b45a39ce7653b015bcb56101c755adf1"></script>
-                <div id="container-b45a39ce7653b015bcb56101c755adf1"></div>
                 <script>
                   atOptions = {
-                    'key' : 'e66e3084f4370be3ee40f727d0de9775',
+                    'key' : '0b13196d21c4ac29c86fefbd10837490',
                     'format' : 'iframe',
-                    'height' : 90,
-                    'width' : 728,
+                    'height' : 50,
+                    'width' : 320,
                     'params' : {}
                   };
                 </script>
-                <script src="https://bauval.org/22/e66e3084f4370be3ee40f727d0de9775"></script>
-                <script data-cfasync="false" src="https://bauval.org/14/562771f3a4515f97bcd8949fed06f1e4"></script>
+                <script src="https://bancadeltempoidea.org/22/0b13196d21c4ac29c86fefbd10837490"></script>
+                <script data-cfasync="false" src="https://bancadeltempoidea.org/14/32991f0b3df4a1990f96fc484219f10e"></script>
+                <script data-cfasync="false" src="https://aarems.org/1/f4073d5400ca2987d76c23eecdb2a464"></script>
             </body>
             </html>
         """.trimIndent()
-        nativeAdWebView.loadDataWithBaseURL("https://bauval.org", nativeAdHtml, "text/html", "UTF-8", null)
+        nativeAdWebView.loadDataWithBaseURL("https://bancadeltempoidea.org", bottomAdHtml, "text/html", "UTF-8", null)
     }
 
     private fun openSmartlink() {
         try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(smartlinkUrl))
+            val url = smartlinkUrls[smartlinkIndex % smartlinkUrls.size]
+            smartlinkIndex++
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
             startActivity(intent)
         } catch (_: Exception) {
         }
+    }
+
+    override fun onDestroy() {
+        adRefreshHandler.removeCallbacks(adRefreshRunnable)
+        super.onDestroy()
     }
 }
